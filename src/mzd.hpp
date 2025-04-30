@@ -1,5 +1,8 @@
 #include <zstd.h>
+#include <array>
 #include <vector>
+#include <unordered_map>
+#include <unordered_set>
 #include <cstdint>
 #include <algorithm>
 
@@ -9,7 +12,8 @@ using buffer_t = std::vector<byte_t>;
 namespace mzd
 {
     /// @brief Implementation details of byte-shuffling and delta codec
-    namespace inner {
+    namespace inner
+    {
         template <typename T>
         void delta_encode(std::vector<T> &data)
         {
@@ -84,6 +88,290 @@ namespace mzd
 
     }
 
+    namespace dict
+    {
+
+        template <typename Z>
+        union byte_view
+        {
+            Z value;
+            std::array<uint8_t, sizeof(Z)> view;
+        };
+
+        template <typename T, typename I, typename K>
+        int encode_dictionary_indices(const std::vector<T> &data, buffer_t &outBuffer, std::vector<I> sorted_values)
+        {
+            std::unordered_map<I, size_t> value_to_indices;
+            value_to_indices.reserve(sorted_values.size());
+
+            for (auto i = 0; i < sorted_values.size(); i++)
+            {
+                value_to_indices[sorted_values[i]] = i;
+            }
+
+            uint64_t n_values = sorted_values.size();
+            byte_view<uint64_t> view;
+
+            auto offset_to_data = (sizeof(I) * n_values) + (sizeof(uint64_t) * 2);
+
+            view.value = offset_to_data;
+            outBuffer.insert(outBuffer.end(), view.view.begin(), view.view.end());
+
+            view.value = n_values;
+            outBuffer.insert(outBuffer.end(), view.view.begin(), view.view.end());
+
+            for (auto vi : sorted_values)
+            {
+                byte_view<I> view;
+                view.value = vi;
+                outBuffer.insert(outBuffer.end(), view.view.begin(), view.view.end());
+            }
+
+            for (auto val : data)
+            {
+                I bytes_of = *reinterpret_cast<I *>(&val);
+                size_t idx = value_to_indices[bytes_of];
+                K k_idx = *reinterpret_cast<K *>(&idx);
+                byte_view<K> view;
+                view.value = k_idx;
+                outBuffer.insert(outBuffer.end(), view.view.begin(), view.view.end());
+            }
+
+            return outBuffer.size();
+        }
+
+        template <typename T, typename I>
+        int encode_values(const std::vector<T> &data, buffer_t &outBuffer)
+        {
+            std::unordered_set<I> value_codes;
+            for (T val : data)
+            {
+                I bytes_of = *reinterpret_cast<I *>(&val);
+                value_codes.insert(bytes_of);
+            }
+
+            std::vector<I> value_codes_sorted = std::vector(value_codes.cbegin(), value_codes.cend());
+            std::sort(value_codes_sorted.begin(), value_codes_sorted.end());
+
+            auto n_values = value_codes_sorted.size();
+
+            if (n_values <= pow(2, 8))
+            {
+                return encode_dictionary_indices<T, I, uint8_t>(data, outBuffer, value_codes_sorted);
+            }
+            else if (n_values <= pow(2, 16))
+            {
+                return encode_dictionary_indices<T, I, uint16_t>(data, outBuffer, value_codes_sorted);
+            }
+            else if (n_values <= pow(2, 32))
+            {
+                return encode_dictionary_indices<T, I, uint32_t>(data, outBuffer, value_codes_sorted);
+            }
+            else if (n_values <= pow(2, 64))
+            {
+                return encode_dictionary_indices<T, I, uint64_t>(data, outBuffer, value_codes_sorted);
+            }
+            else
+            {
+                throw new std::exception("Cannot encode a dictionary with more than 2 ** 64 distinct values");
+            }
+            return 0;
+        }
+
+        template <typename T>
+        int dictionary_encode(const std::vector<T> &data, buffer_t &outBuffer)
+        {
+            if (sizeof(T) <= 1)
+            {
+                return encode_values<T, uint8_t>(data, outBuffer);
+            }
+            else if (sizeof(T) <= 2)
+            {
+                return encode_values<T, uint16_t>(data, outBuffer);
+            }
+            else if (sizeof(T) <= 4)
+            {
+                return encode_values<T, uint32_t>(data, outBuffer);
+            }
+            else if (sizeof(T) <= 8)
+            {
+                return encode_values<T, uint64_t>(data, outBuffer);
+            }
+            else
+            {
+                throw new std::exception("Cannot encode a dictionary with more values longer than 8 bytes");
+            }
+            return 0;
+        }
+
+        template <typename T, typename I>
+        int decode_values(const buffer_t &data, size_t offset, size_t n_values, std::vector<T> &values)
+        {
+            auto start = data.begin() + 16;
+            auto end = data.begin() + offset;
+            auto step_size = sizeof(I);
+            std::array<uint8_t, sizeof(I)> block;
+
+            auto i = 0;
+            while (start != end)
+            {
+                std::copy(start, start + step_size, block.begin());
+                T val = *reinterpret_cast<T *>(&block);
+                std::cout << '\t' << val << std::endl;
+                values.push_back(val);
+                start += step_size;
+                i += 1;
+            }
+            return i;
+        }
+
+        template <typename T, typename K>
+        int decode_indices(const buffer_t &data, size_t offset, std::vector<T> &values_lookup, std::vector<T> &values)
+        {
+            auto start = data.begin() + offset;
+            auto end = data.end();
+
+            auto step_size = sizeof(K);
+            std::array<uint8_t, sizeof(K)> block;
+
+            while (start != end)
+            {
+                std::copy(start, start + step_size, block.begin());
+                K idx = *reinterpret_cast<K *>(&block);
+                T val = values_lookup[idx];
+                values.push_back(val);
+                start += step_size;
+            }
+            return 0;
+        }
+
+        template <typename T>
+        int dictionary_decode(const buffer_t &data, std::vector<T> &outBuffer)
+        {
+            if (data.size() < 16)
+            {
+                throw new std::exception("Buffer less than 16 bytes long, invalid dictionary buffer");
+            }
+
+            byte_view<uint64_t> view;
+            std::copy(data.begin(), data.begin() + 8, view.view.begin());
+            auto offset = view.value;
+
+            std::copy(data.begin() + 8, data.begin() + 16, view.view.begin());
+            auto n_values = view.value;
+
+            if (data.size() < offset)
+            {
+                throw new std::exception("Buffer less than value offsets, invalid dictionary buffer");
+            }
+
+            auto value_size = (offset - 16) / n_values;
+
+            std::vector<T> value_lookup;
+            if (value_size == 1)
+            {
+                decode_values<T, uint8_t>(data, offset, n_values, value_lookup);
+                if (n_values < pow(2, 8))
+                {
+                    decode_indices<T, uint8_t>(data, offset, value_lookup, outBuffer);
+                }
+                else if (n_values < pow(2, 16))
+                {
+                    decode_indices<T, uint16_t>(data, offset, value_lookup, outBuffer);
+                }
+                else if (n_values < pow(2, 32))
+                {
+                    decode_indices<T, uint32_t>(data, offset, value_lookup, outBuffer);
+                }
+                else if (n_values < pow(2, 64))
+                {
+                    decode_indices<T, uint64_t>(data, offset, value_lookup, outBuffer);
+                }
+                else
+                {
+                    throw new std::exception("Too many value indices!");
+                }
+            }
+            else if (value_size == 2)
+            {
+                decode_values<T, uint16_t>(data, offset, n_values, value_lookup);
+                if (n_values < pow(2, 8))
+                {
+                    decode_indices<T, uint8_t>(data, offset, value_lookup, outBuffer);
+                }
+                else if (n_values < pow(2, 16))
+                {
+                    decode_indices<T, uint16_t>(data, offset, value_lookup, outBuffer);
+                }
+                else if (n_values < pow(2, 32))
+                {
+                    decode_indices<T, uint32_t>(data, offset, value_lookup, outBuffer);
+                }
+                else if (n_values < pow(2, 64))
+                {
+                    decode_indices<T, uint64_t>(data, offset, value_lookup, outBuffer);
+                }
+                else
+                {
+                    throw new std::exception("Too many value indices!");
+                }
+            }
+            else if (value_size == 4)
+            {
+                decode_values<T, uint32_t>(data, offset, n_values, value_lookup);
+                if (n_values < pow(2, 8))
+                {
+                    decode_indices<T, uint8_t>(data, offset, value_lookup, outBuffer);
+                }
+                else if (n_values < pow(2, 16))
+                {
+                    decode_indices<T, uint16_t>(data, offset, value_lookup, outBuffer);
+                }
+                else if (n_values < pow(2, 32))
+                {
+                    decode_indices<T, uint32_t>(data, offset, value_lookup, outBuffer);
+                }
+                else if (n_values < pow(2, 64))
+                {
+                    decode_indices<T, uint64_t>(data, offset, value_lookup, outBuffer);
+                }
+                else
+                {
+                    throw new std::exception("Too many value indices!");
+                }
+            }
+            else if (value_size == 8)
+            {
+                decode_values<T, uint64_t>(data, offset, n_values, value_lookup);
+                if (n_values < pow(2, 8))
+                {
+                    decode_indices<T, uint8_t>(data, offset, value_lookup, outBuffer);
+                }
+                else if (n_values < pow(2, 16))
+                {
+                    decode_indices<T, uint16_t>(data, offset, value_lookup, outBuffer);
+                }
+                else if (n_values < pow(2, 32))
+                {
+                    decode_indices<T, uint32_t>(data, offset, value_lookup, outBuffer);
+                }
+                else if (n_values < pow(2, 64))
+                {
+                    decode_indices<T, uint64_t>(data, offset, value_lookup, outBuffer);
+                }
+                else
+                {
+                    throw new std::exception("Too many value indices!");
+                }
+            }
+            else
+            {
+                throw new std::exception("Value size too large, value cannot be longer than 8 bytes");
+            }
+
+            return 0;
+        }
+    }
 
     using namespace inner;
 
@@ -109,8 +397,7 @@ namespace mzd
             outputBound,
             (void *)transposeBuffer.data(),
             transposeBuffer.size(),
-            level
-        );
+            level);
         if (ZSTD_isError(used))
         {
             return used;
@@ -166,8 +453,7 @@ namespace mzd
         std::vector<T> &data,
         buffer_t &transposeBuffer,
         buffer_t &outBuffer,
-        int level = ZSTD_defaultCLevel()
-    )
+        int level = ZSTD_defaultCLevel())
     {
         delta_encode(data);
         return compress_buffer(data, transposeBuffer, outBuffer);
@@ -183,11 +469,61 @@ namespace mzd
     size_t delta_decompress_buffer(
         const buffer_t &buffer,
         buffer_t &transposeBuffer,
-        std::vector<T> &dataBuffer
-    )
+        std::vector<T> &dataBuffer)
     {
         auto z = decompress_buffer(buffer, transposeBuffer, dataBuffer);
         delta_decode(dataBuffer);
         return z;
+    }
+
+    template <typename T>
+    size_t dict_compress_buffer(
+        const std::vector<T> &data,
+        buffer_t &dictBuffer,
+        buffer_t &outBuffer,
+        int level = ZSTD_defaultCLevel())
+    {
+        dictBuffer.clear();
+        dict::dictionary_encode(data, dictBuffer);
+        dictBuffer.shrink_to_fit();
+
+        auto outputBound = ZSTD_compressBound(dictBuffer.size());
+        outBuffer.resize(outputBound);
+        auto used = ZSTD_compress(
+            (void *)outBuffer.data(),
+            outputBound,
+            (void *)dictBuffer.data(),
+            dictBuffer.size(),
+            level);
+        if (ZSTD_isError(used))
+        {
+            return used;
+        }
+        outBuffer.resize(used);
+        return 0;
+    }
+
+    template <typename T>
+    size_t dict_decompress_buffer(
+        const buffer_t &buffer,
+        buffer_t &dictBuffer,
+        std::vector<T> &dataBuffer)
+    {
+        dictBuffer.clear();
+        auto outputBound = ZSTD_getFrameContentSize(buffer.data(), buffer.size());
+        if (ZSTD_isError(outputBound))
+        {
+            return outputBound;
+        }
+        dictBuffer.resize(outputBound);
+        auto used = ZSTD_decompress(
+            (void *)dictBuffer.data(),
+            outputBound,
+            (void *)buffer.data(),
+            buffer.size());
+        dataBuffer.clear();
+        return dict::dictionary_decode(
+            dictBuffer,
+            dataBuffer);
     }
 }
