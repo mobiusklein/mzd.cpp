@@ -44,5 +44,14 @@ int main() {
         std::cout << i << ": " << ref[i] << " " << read_out[i] << std::endl;
     }
 
+    revert.clear();
+    mzd::dict_compress_buffer(ref, dict_buffer, buffer);
+    mzd::dict_decompress_buffer(buffer, dict_buffer, revert);
+
+    for (auto i = 0; i < revert.size(); i++)
+    {
+        std::cout << i << ": " << ref[i] << " " << read_out[i] << std::endl;
+    }
+
     return 0;
 }
