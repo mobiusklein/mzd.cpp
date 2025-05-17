@@ -95,6 +95,10 @@ namespace mzd
     /// @brief Implementation details of byte-shuffling and delta codec
     namespace inner
     {
+
+        using mzd::binary::byte_view;
+        using mzd::binary::is_big_endian;
+
         template <typename T>
         void delta_encode(std::vector<T> &data)
         {
@@ -132,6 +136,10 @@ namespace mzd
             }
         }
 
+        /// @brief Shuffle the bytes of `data` into `buffer`. Also enforces little-endian ordering
+        /// @tparam T
+        /// @param data The data to transpose
+        /// @param buffer Where to transpose the data into
         template <typename T>
         void transpose(const std::vector<T> &data, buffer_t &buffer)
         {
@@ -146,7 +154,11 @@ namespace mzd
                 {
                     auto value = data[j];
                     auto byteView = reinterpret_cast<uint8_t *>(&value);
-                    buffer.push_back(byteView[i]);
+                    if (is_big_endian()) {
+                        buffer.push_back(byteView[(sizeof(T) - 1) - i]);
+                    } else {
+                        buffer.push_back(byteView[i]);
+                    }
                 }
             }
             return;
@@ -162,7 +174,11 @@ namespace mzd
             {
                 auto datum = &data[i % nData];
                 auto byteView = reinterpret_cast<uint8_t *>(datum);
-                byteView[i / nData] = buffer[i];
+                if (is_big_endian()) {
+                    byteView[(sizeof(T) - 1) - (i / nData)] = buffer[i];
+                } else {
+                    byteView[i / nData] = buffer[i];
+                }
             }
             return;
         }
@@ -467,7 +483,7 @@ namespace mzd
     /// @param level The ZSTD compression level
     /// @return 0 if successful, some other value corresponding to a ZSTD error code otherwise
     template <typename T>
-    size_t compress_buffer(const std::vector<T> &data,
+    size_t byteshuffle_compress_buffer(const std::vector<T> &data,
                            buffer_t &transposeBuffer,
                            buffer_t &outBuffer,
                            int level = ZSTD_defaultCLevel())
@@ -497,7 +513,7 @@ namespace mzd
     /// @param dataBuffer The data array to decompress into
     /// @return 0 if successful, some other value corresponding to a ZSTD error code otherwise
     template <typename T>
-    size_t decompress_buffer(const buffer_t &buffer,
+    size_t byteshuffle_decompress_buffer(const buffer_t &buffer,
                              buffer_t &transposeBuffer,
                              std::vector<T> &dataBuffer)
     {
@@ -537,7 +553,7 @@ namespace mzd
         int level = ZSTD_defaultCLevel())
     {
         inner::delta_encode(data);
-        return compress_buffer(data, transposeBuffer, outBuffer);
+        return byteshuffle_compress_buffer(data, transposeBuffer, outBuffer);
     }
 
     /// @brief Decompress an array of numerical data using delta encoding, byte shuffling and ZSTD compression
@@ -552,7 +568,7 @@ namespace mzd
         buffer_t &transposeBuffer,
         std::vector<T> &dataBuffer)
     {
-        auto z = decompress_buffer(buffer, transposeBuffer, dataBuffer);
+        auto z = byteshuffle_decompress_buffer(buffer, transposeBuffer, dataBuffer);
         inner::delta_decode(dataBuffer);
         return z;
     }
@@ -619,5 +635,82 @@ namespace mzd
         return dict::dictionary_decode(
             dictBuffer,
             dataBuffer);
+    }
+
+    template <typename T>
+    size_t compress_buffer(const std::vector<T> &data,
+                           buffer_t &outBuffer,
+                           int level = ZSTD_defaultCLevel())
+    {
+        auto outputBound = ZSTD_compressBound(data.size());
+        outBuffer.resize(outputBound);
+        if (mzd::binary::is_big_endian())
+        {
+            buffer_t revEndian;
+            revEndian.reserve(data.size() * sizeof(T));
+            for (size_t i = 0; i < data.size(); i++)
+            {
+                auto val = data[i];
+                binary::byte_view<T> view = binary::byte_view<T>::as_little_endian(val);
+                std::copy(view.begin(), view.end(), revEndian.end());
+            }
+            auto used = ZSTD_compress(
+                (void *)outBuffer.data(),
+                outputBound,
+                (void *)revEndian.data(),
+                revEndian.size(),
+                level);
+            if (ZSTD_isError(used))
+            {
+                return used;
+            }
+            outBuffer.resize(used);
+        }
+        else
+        {
+            auto used = ZSTD_compress(
+                (void *)outBuffer.data(),
+                outputBound,
+                (void *)data.data(),
+                data.size(),
+                level);
+            if (ZSTD_isError(used))
+            {
+                return used;
+            }
+            outBuffer.resize(used);
+        }
+        return 0;
+    }
+
+    template <typename T>
+    size_t decompress_buffer(const buffer_t &buffer, std::vector<T> &dataBuffer)
+    {
+        auto outputBound = ZSTD_getFrameContentSize(buffer.data(), buffer.size());
+        if (ZSTD_isError(outputBound))
+        {
+            return outputBound;
+        }
+        dataBuffer.resize(outputBound);
+        auto used = ZSTD_decompress(
+            (void *)dataBuffer.data(),
+            outputBound,
+            (void *)buffer.data(),
+            buffer.size());
+        if (ZSTD_isError(used))
+        {
+            return used;
+        }
+        if (binary::is_big_endian())
+        {
+            for (size_t i = 0; i < dataBuffer.size(); i++)
+            {
+                T val = dataBuffer[i];
+                binary::byte_view<T> view(val);
+                view.byteswap();
+                dataBuffer[i] = view.value();
+            }
+        }
+        return 0;
     }
 }
