@@ -1,6 +1,8 @@
 #include <zstd.h>
 #include <array>
 #include <vector>
+#include <span>
+#include <ranges>
 #include <unordered_map>
 #include <unordered_set>
 #include <cstdint>
@@ -9,6 +11,7 @@
 
 using byte_t = std::uint8_t;
 using buffer_t = std::vector<byte_t>;
+using buffer_span_t = std::span<const byte_t>;
 
 namespace mzd
 {
@@ -165,7 +168,7 @@ namespace mzd
         }
 
         template <typename T>
-        void reverse_tranpose(const buffer_t &buffer, std::vector<T> &data)
+        void reverse_transpose(const buffer_t &buffer, std::vector<T> &data)
         {
             auto nBytes = buffer.size();
             auto nData = nBytes / sizeof(T);
@@ -183,6 +186,28 @@ namespace mzd
             return;
         }
 
+        template <typename T>
+        void reverse_transpose(const buffer_span_t &buffer, std::vector<T> &data)
+        {
+            auto nBytes = buffer.size();
+            auto nData = nBytes / sizeof(T);
+            data.resize(nData);
+            for (size_t i = 0; i < buffer.size(); i++)
+            {
+                auto datum = &data[i % nData];
+                auto byteView = reinterpret_cast<uint8_t *>(datum);
+                if (is_big_endian())
+                {
+                    byteView[(sizeof(T) - 1) - (i / nData)] = buffer[i];
+                }
+                else
+                {
+                    byteView[i / nData] = buffer[i];
+                }
+            }
+            return;
+        }
+
     }
 
     /// @brief Implementation of the dictionary codec
@@ -191,6 +216,8 @@ namespace mzd
 
         using mzd::binary::byte_view;
         using mzd::binary::is_big_endian;
+        using mzd::inner::reverse_transpose;
+        using mzd::inner::transpose;
 
         template <typename T, typename I, typename K>
         int encode_dictionary_indices(const std::vector<T> &data, buffer_t &outBuffer, std::vector<I> sorted_values)
@@ -212,20 +239,23 @@ namespace mzd
             view = byte_view<uint64_t>::as_little_endian(n_values);
             outBuffer.insert(outBuffer.end(), view.begin(), view.end());
 
-            for (auto vi : sorted_values)
-            {
-                byte_view<I> view = byte_view<I>::as_little_endian(vi);
-                outBuffer.insert(outBuffer.end(), view.begin(), view.end());
-            }
+            buffer_t transposeBuffer;
+            transpose(sorted_values, transposeBuffer);
+            outBuffer.insert(outBuffer.end(), transposeBuffer.begin(), transposeBuffer.end());
+
+            std::vector<K> index_buffer;
+            index_buffer.reserve(data.size());
 
             for (auto val : data)
             {
                 I bytes_of = *reinterpret_cast<I *>(&val);
                 size_t idx = value_to_indices[bytes_of];
                 K k_idx = *reinterpret_cast<K *>(&idx);
-                byte_view<K> view = byte_view<K>::as_little_endian(k_idx);
-                outBuffer.insert(outBuffer.end(), view.begin(), view.end());
+                index_buffer.push_back(k_idx);
             }
+
+            transpose(index_buffer, transposeBuffer);
+            outBuffer.insert(outBuffer.end(), transposeBuffer.begin(), transposeBuffer.end());
 
             return outBuffer.size();
         }
@@ -302,16 +332,18 @@ namespace mzd
             auto step_size = sizeof(I);
             byte_view<I> block;
 
+            std::span slice(start, end);
+            std::vector<I> blocks;
+            reverse_transpose(slice, blocks);
+
             auto i = 0;
-            while (start != end)
-            {
-                std::copy(start, start + step_size, block.begin());
+            for (auto chunk : blocks) {
+                block.inner.value = chunk;
                 if constexpr (is_big_endian()) {
                     block.byteswap();
                 }
                 T val = *reinterpret_cast<T *>(&block.buffer());
                 values.push_back(val);
-                start += step_size;
                 i += 1;
             }
             return i;
@@ -322,22 +354,20 @@ namespace mzd
         {
             auto start = data.begin() + offset;
             auto end = data.end();
-
-            auto step_size = sizeof(K);
             byte_view<K> block;
 
-            while (start != end)
-            {
-                std::copy(start, start + step_size, block.begin());
-                if constexpr
-                    (is_big_endian())
-                    {
-                        block.byteswap();
-                    }
-                K idx = *reinterpret_cast<K *>(&block);
+            std::span slice(start, end);
+            std::vector<K> blocks;
+            reverse_transpose(slice, blocks);
+
+            for(auto idx : blocks) {
+                if constexpr (is_big_endian()) {
+                    block.inner.value = idx;
+                    block.byteswap();
+                    idx = block.value();
+                }
                 T val = values_lookup[idx];
                 values.push_back(val);
-                start += step_size;
             }
             return 0;
         }
@@ -534,7 +564,7 @@ namespace mzd
             return used;
         }
         transposeBuffer.resize(used);
-        inner::reverse_tranpose(transposeBuffer, dataBuffer);
+        inner::reverse_transpose(transposeBuffer, dataBuffer);
         return 0;
     }
 
