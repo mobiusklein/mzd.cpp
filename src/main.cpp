@@ -6,8 +6,6 @@
 #include "mzd.hpp"
 
 int main() {
-    std::cout << "Hello, world" << std::endl;
-
     std::vector<double> data = {1, 2, 3, 4, 5};
     buffer_t buffer;
     buffer_t transposeBuffer;
@@ -45,7 +43,9 @@ int main() {
     }
 
     revert.clear();
+    std::cout << "Encoding dictionary" << std::endl;
     mzd::dict_compress_buffer(ref, dict_buffer, buffer);
+    std::cout << "Decoding dictionary" << std::endl;
     mzd::dict_decompress_buffer(buffer, dict_buffer, revert);
 
     for (auto i = 0; i < revert.size(); i++)

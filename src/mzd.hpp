@@ -2,9 +2,7 @@
 #include <array>
 #include <vector>
 #include <span>
-#include <ranges>
 #include <unordered_map>
-#include <unordered_set>
 #include <cstdint>
 #include <algorithm>
 #include <bit>
@@ -167,6 +165,41 @@ namespace mzd
             return;
         }
 
+        /// @brief Shuffle the bytes of `data` into `buffer`. Also enforces little-endian ordering
+        /// @tparam T
+        /// @param data The data to transpose
+        /// @param buffer Where to transpose the data into
+        template <typename T>
+        void transpose(const std::span<const T> &data, buffer_t &buffer)
+        {
+            auto nData = data.size();
+            auto nBytes = nData * sizeof(T);
+
+            buffer.clear();
+            buffer.reserve(nBytes);
+            for (size_t i = 0; i < sizeof(T); i++)
+            {
+                for (size_t j = 0; j < data.size(); j++)
+                {
+                    auto value = data[j];
+                    auto byteView = reinterpret_cast<uint8_t *>(&value);
+                    if (is_big_endian())
+                    {
+                        buffer.push_back(byteView[(sizeof(T) - 1) - i]);
+                    }
+                    else
+                    {
+                        buffer.push_back(byteView[i]);
+                    }
+                }
+            }
+            return;
+        }
+
+        /// @brief Reverses the byte shuffling done by `tranpose` to read values from `buffer` back out into `data`
+        /// @tparam T
+        /// @param buffer The transposesd data
+        /// @param data Where to store the un-transposed data
         template <typename T>
         void reverse_transpose(const buffer_t &buffer, std::vector<T> &data)
         {
@@ -186,6 +219,10 @@ namespace mzd
             return;
         }
 
+        /// @brief Reverses the byte shuffling done by `tranpose` to read values from `buffer` back out into `data`
+        /// @tparam T
+        /// @param buffer The transposesd data
+        /// @param data Where to store the un-transposed data
         template <typename T>
         void reverse_transpose(const buffer_span_t &buffer, std::vector<T> &data)
         {
@@ -543,9 +580,9 @@ namespace mzd
     /// @param dataBuffer The data array to decompress into
     /// @return 0 if successful, some other value corresponding to a ZSTD error code otherwise
     template <typename T>
-    size_t byteshuffle_decompress_buffer(const buffer_t &buffer,
-                             buffer_t &transposeBuffer,
-                             std::vector<T> &dataBuffer)
+    size_t byteshuffle_decompress_buffer(const buffer_span_t &buffer,
+                                         buffer_t &transposeBuffer,
+                                         std::vector<T> &dataBuffer)
     {
         transposeBuffer.clear();
         auto outputBound = ZSTD_getFrameContentSize(buffer.data(), buffer.size());
@@ -594,7 +631,7 @@ namespace mzd
     /// @return 0 if successful, some other value corresponding to a ZSTD error code otherwise
     template <typename T>
     size_t delta_decompress_buffer(
-        const buffer_t &buffer,
+        const buffer_span_t &buffer,
         buffer_t &transposeBuffer,
         std::vector<T> &dataBuffer)
     {
@@ -645,7 +682,7 @@ namespace mzd
     /// @return 0 if successful, some other value corresponding to a ZSTD error code otherwise
     template <typename T>
     size_t dict_decompress_buffer(
-        const buffer_t &buffer,
+        const buffer_span_t &buffer,
         buffer_t &dictBuffer,
         std::vector<T> &dataBuffer)
     {
@@ -714,7 +751,7 @@ namespace mzd
     }
 
     template <typename T>
-    size_t decompress_buffer(const buffer_t &buffer, std::vector<T> &dataBuffer)
+    size_t decompress_buffer(const buffer_span_t &buffer, std::vector<T> &dataBuffer)
     {
         auto outputBound = ZSTD_getFrameContentSize(buffer.data(), buffer.size());
         if (ZSTD_isError(outputBound))
