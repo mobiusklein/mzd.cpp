@@ -6,12 +6,15 @@ re-arranging the bytes (or bits) of the elements of the data array prior to comp
 This has to do with how numbers are laid out in memory, and mileage may vary as to whether shuffling
 always improves compression ratios. Also, as a note to some readers, while we use the term "shuffle",
 *this is not a random operation* analogous to shuffling a deck of cards is supposed to be, but closer
-in execution to a structured re-arrangement of bytes in multi-byte data types.
+in execution to a structured re-arrangement of bytes in multi-byte data types. Consider the following
+array of two numbers:
+
 ```
 [549.1  552.22]
 ```
-We can view these double-precision floats (64 bits) as contiguous blocks of 8 bytes (8 bits) each
-These bytes are what a compression algorithm will see when it tries to compact your data. 
+
+We can view these double-precision floats (64 bits) as contiguous blocks of 8 bytes each
+These bytes are what a compression algorithm will see when it tries to compact your data.
 Byte-shuffling re-arranges your data so that the $i$th byte of each element is stored contiguously:
 
 ![](byte_shuffle.png)
@@ -96,23 +99,23 @@ void reverse_transpose(const buffer_t &buffer, std::vector<T> &data)
 # Dictionary Encoding
 ## Motivation
 
-Some data arrays are hard to compress simply because their data spans a wide range of possible values but lacks
-structures or patterns that make compression possible despite many repetitions of the same value, simply
+Some data arrays are hard to compress simply because their elements span a wide range of possible values but lacks
+structures or patterns that make compression efficient despite many repetitions of the same value, simply
 because of how they are organized.
 
 A good example of this is ion mobility, where the values span an instrument-specific domain with varying levels
 of precision, and these points are repeated out-of-order because ion mobility arrays are sorted along the m/z axis.
 
-One thing a compression algorithm does is finds repeated patterns and encodes the pattern in a lookup table or "dictionary"
-and associates a unique token or placeholder that uses less space than the original pattern. How big patterns may be, what
-criteria they must satisfy, and other things, depend upon the algorithm, but these algorithms generally don't know much about
+One thing a compression algorithm does is find repeated patterns and encode the pattern in a lookup table or "dictionary",
+and associate a unique token or placeholder that uses less space than the original pattern. How big patterns may be, what
+criteria they must satisfy, and other factors, depend upon the algorithm, but these algorithms generally don't know much about
 the data they compress, which prevents them from making simplifying assumptions.
 
 Since **we** know the context in which we are working, we can pre-construct a dictionary to encode the data with, and apply
 the general purpose compression algorithm on that the encoding instead, assuming it is simpler than the original. At the same
 time, we recognize that being *very, very clever* to shave 5% off the total size of our data but produce an algorithm so convoluted
-nobody but the creator could implement in multiple languages is a recipe for a waste of time so we hope to make the algorithm simple
-enough that other people can understand it if the portfolio of reference implementations aren't sufficient for their needs.
+that nobody but the creator could implement in multiple languages is a recipe for a waste of time so we hope to make the algorithm simple
+enough that other people can understand it if the portfolio of reference implementations isn't sufficient for their needs.
 
 ## Method
 
@@ -450,15 +453,15 @@ We can then write the following structure in bytes:
 
 ![](./DictionaryByteSchemata.png)
 
-We prefix the dictionary encoding with two 8 byte unsigned integers in little endian order. The first is the distance, in bytes, from the begining
+We prefix the dictionary encoding with two 8 byte unsigned integers in little endian order. The first is the distance, in bytes, from the beginning
 of the buffer to the begining of the region encoding $K$, $i_{\text{offset}}$. The second is the number of unique values in $V^*$. Next, we encode
-the bytes of$V^*$ in the buffer in little endian byte order, followed by the bytes of $K$ in little endian byte order.
+the bytes of $V^*$ in the buffer in little endian byte order, followed by the bytes of $K$ in little endian byte order.
 
 ### Decoding
 
 To decode, we first read the first 16 bytes and interpret it as two 64 bit unsigned integers which tells us the offset $i_{\text{offset}}$ to the index list $K$ and
 the number of values in $V^*$, $|V^*|$. We assume we know the type of value we want to decode $V^*$ into, so we can validate that $\frac{i_{\text{offset}} - 16}{|V^*|}$
-matches the size of that type in bytes. It is then straight-forwards to reconstruct $V^*$ from byte 16 to the index offset, reinterpreting the bytes
+matches the size of that type in bytes. It is then straight forward to reconstruct $V^*$ from byte 16 to the index offset, reinterpreting the bytes
 as needed to build a native representation of $V^*$ in the correct type. Next, we infer the $I^*$ from $|V^*|$ using the same logic as during
 encoding. Finally, we reconstruct the original data array $V$ using $V = [ V^*[k_i] : k_i \in K ]$.
 
@@ -1085,8 +1088,8 @@ type when shuffled, even unsorted.
 
 ![](./DictionaryByteSchemataWithShuffle.png)
 
-This is relatively straight-forwards to do by injecting the shuffling step immediately prior to
-encoding the dictionary buffers and decoding them prior to using them as an index map. 
+This is relatively straight forward to do by injecting the shuffling step immediately prior to
+encoding the dictionary buffers and decoding them prior to using them as an index map.
 
 ```python
 def dict_encode_with_shuffle(data: np.typing.ArrayLike) -> bytes:
@@ -1133,7 +1136,7 @@ def dict_decode_with_shuffle(buffer: np.typing.ArrayLike, dtype: np.dtype) -> by
         raise ValueError(f"Cannot find index dtype for {n_values} indices")
     values = buffer[16:offset_to_data].view(byte_view_tp)
     indices = buffer[offset_to_data:].view(index_tp)
-    
+
     indices = byte_shuffle_decode(indices.view(np.uint8), index_tp)
     values = byte_shuffle_decode(values.view(np.uint8), byte_view_tp)
     return values[indices].view(dtype)
