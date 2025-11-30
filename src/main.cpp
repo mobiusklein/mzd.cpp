@@ -26,9 +26,10 @@ int main() {
         std::cout << i << ": " << ref[i] << " " << revert[i] << std::endl;
     }
 
+    transposeBuffer.clear();
     buffer_t dict_buffer;
     std::cout << "Encoding dictionary" << std::endl;
-    mzd::dict::dictionary_encode(ref, dict_buffer);
+    mzd::dict::dictionary_encode(ref, transposeBuffer, dict_buffer);
     std::vector<double> read_out;
     std::cout << "Decoding dictionary" << std::endl;
     try {
