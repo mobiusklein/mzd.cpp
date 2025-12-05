@@ -124,7 +124,7 @@ enough that other people can understand it if the portfolio of reference impleme
 We construct a lookup table by first collecting all the unique values in a data array $V$, called $V^*$, and sort $V^*$ so adjacent values are
 close together to hopefully make them easier to compress later. Based upon the number of unique items, we can determine the largest bit width
 "index" or "key" type we need to address them all. For ion mobility data at the time of this writing, there are fewer than 1,000 unique values
-recorded by instruments today, which fits tidily in use 2<sup>16</sup> bits. Next, we build a mapping from value to its index in $V^*$ using the
+recorded by instruments today, which fits tidily in 2<sup>16</sup> bits. Next, we build a mapping from value to its index in $V^*$ using the
 smallest standard integer type $I^*$, and create a new array $K = [ \text{map}(v_j) : v \in V ]$.
 
 We can then write the following structure in bytes:
