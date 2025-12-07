@@ -33,3 +33,23 @@ target_include_directories(
     PRIVATE
     ${zstd_SOURCE_DIR}/lib
 )
+
+#------------------------------------------------------------------------------
+# Enable testing with CTest
+enable_testing()
+
+add_executable(test_all test/test_all.cpp)
+target_link_libraries(
+    test_all
+    PRIVATE
+    libzstd_static
+)
+
+# On windows and macos this is needed
+target_include_directories(
+    test_all
+    PRIVATE
+    ${zstd_SOURCE_DIR}/lib
+)
+
+add_test(NAME test_all COMMAND test_all)

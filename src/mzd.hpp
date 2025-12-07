@@ -429,6 +429,10 @@ namespace mzd
         {
             if (data.size() < 16)
             {
+                if (data.empty()) {
+                    outBuffer.clear();
+                    return 0;
+                }
                 throw new std::exception("Buffer less than 16 bytes long, invalid dictionary buffer");
             }
 
@@ -442,6 +446,11 @@ namespace mzd
             if (data.size() < offset)
             {
                 throw new std::exception("Buffer less than value offsets, invalid dictionary buffer");
+            }
+
+            if (n_values == 0) {
+                outBuffer.clear();
+                return 0;
             }
 
             auto value_size = (offset - 16) / n_values;
@@ -609,6 +618,10 @@ namespace mzd
                                          buffer_t &transposeBuffer,
                                          std::vector<T> &dataBuffer)
     {
+        if (buffer.empty()) {
+            dataBuffer.clear();
+            return 0;
+        }
         transposeBuffer.clear();
         auto outputBound = ZSTD_getFrameContentSize(buffer.data(), buffer.size());
         if (ZSTD_isError(outputBound))
@@ -724,6 +737,10 @@ namespace mzd
         buffer_t &dictBuffer,
         std::vector<T> &dataBuffer)
     {
+        if(buffer.empty()) {
+            dataBuffer.clear();
+            return 0;
+        }
         dictBuffer.clear();
         auto outputBound = ZSTD_getFrameContentSize(buffer.data(), buffer.size());
         if (ZSTD_isError(outputBound))
@@ -791,6 +808,10 @@ namespace mzd
     template <typename T>
     size_t decompress_buffer(const buffer_span_t &buffer, std::vector<T> &dataBuffer)
     {
+        if (buffer.empty()) {
+            dataBuffer.clear();
+            return 0;
+        }
         auto outputBound = ZSTD_getFrameContentSize(buffer.data(), buffer.size());
         if (ZSTD_isError(outputBound))
         {
