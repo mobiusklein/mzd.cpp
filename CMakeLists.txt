@@ -10,7 +10,7 @@ set(ZSTD_BUILD_SHARED OFF)
 
 FetchContent_Declare(
     zstd
-    URL "https://github.com/facebook/zstd/releases/download/v1.5.5/zstd-1.5.5.tar.gz"
+    URL "https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz"
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
     SOURCE_SUBDIR build/cmake
 )

@@ -11,15 +11,7 @@ int main() {
     buffer_t transposeBuffer;
 
     std::vector<double> ref(data);
-
-    std::cout << "Compressing" << std::endl;
-    mzd::delta_compress_buffer(data, transposeBuffer, buffer);
-    std::cout << "Buffer is now " << buffer.size() << " elements long" << std::endl;
-
-    std::cout << "Decompressing" << std::endl;
-
     std::vector<double> revert;
-    mzd::delta_decompress_buffer(buffer, transposeBuffer, revert);
 
     std::cout << "Decompressed size: " << revert.size() << std::endl;
     for(auto i = 0; i < revert.size(); i++) {
@@ -29,7 +21,7 @@ int main() {
     transposeBuffer.clear();
     buffer_t dict_buffer;
     std::cout << "Encoding dictionary" << std::endl;
-    mzd::dict::dictionary_encode(ref, transposeBuffer, dict_buffer);
+    mzd::dict::dictionary_encode<double>(ref, transposeBuffer, dict_buffer);
     std::vector<double> read_out;
     std::cout << "Decoding dictionary" << std::endl;
     try {
@@ -45,7 +37,7 @@ int main() {
 
     revert.clear();
     std::cout << "Encoding dictionary" << std::endl;
-    mzd::dict_compress_buffer(ref, dict_buffer, buffer);
+    mzd::dict_compress_buffer<double>(ref, dict_buffer, buffer);
     std::cout << "Decoding dictionary" << std::endl;
     mzd::dict_decompress_buffer(buffer, dict_buffer, revert);
 

@@ -1,3 +1,6 @@
+#ifndef _MZDHPP_
+#define _MZDHPP_
+
 #include <zstd.h>
 #include <array>
 #include <vector>
@@ -7,6 +10,8 @@
 #include <cstdint>
 #include <algorithm>
 #include <bit>
+#include <sstream>
+#include <stdexcept>
 
 using byte_t = std::uint8_t;
 using buffer_t = std::vector<byte_t>;
@@ -22,38 +27,48 @@ namespace mzd
             return std::endian::native == std::endian::big;
         }
 
-        template <typename Z>
-        union _byte_view_impl
+        inline unsigned int byteswap(unsigned int n)
         {
-            Z value;
-            std::array<uint8_t, sizeof(Z)> view;
-        };
+            return ((n & 0xff) << 24) | ((n & 0xff00) << 8) | ((n & 0xff0000) >> 8) | ((n & 0xff000000) >> 24);
+        }
+
+        inline unsigned long long byteswap(unsigned long long n)
+        {
+            return ((n & 0x00000000000000ffll) << 56) |
+                   ((n & 0x000000000000ff00ll) << 40) |
+                   ((n & 0x0000000000ff0000ll) << 24) |
+                   ((n & 0x00000000ff000000ll) << 8) |
+                   ((n & 0x000000ff00000000ll) >> 8) |
+                   ((n & 0x0000ff0000000000ll) >> 24) |
+                   ((n & 0x00ff000000000000ll) >> 40) |
+                   ((n & 0xff00000000000000ll) >> 56);
+        }
 
         template <typename Z>
         struct byte_view
         {
-            _byte_view_impl<Z> inner;
+            Z inner;
 
             byte_view() {}
 
-            byte_view(Z value)
+            byte_view(const Z value)
             {
-                this->inner.value = value;
+                std::memcpy((void *)(&this->inner), (void *)(&value), sizeof(Z));
             }
 
             Z value()
             {
-                return this->inner.value;
+                return this->inner;
             }
 
-            std::array<uint8_t, sizeof(Z)> &buffer()
+            std::span<uint8_t, sizeof(Z)> buffer()
             {
-                return this->inner.view;
+                return std::span<uint8_t, sizeof(Z)>(reinterpret_cast<byte_t *>(&this->inner), sizeof(Z));
             }
 
             byte_view(std::array<uint8_t, sizeof(Z)> view)
             {
-                this->inner.view = view;
+                std::memcpy((void *)(&this->inner), (void *)(&view), sizeof(Z));
             }
 
             static byte_view as_little_endian(Z value)
@@ -78,65 +93,38 @@ namespace mzd
 
             auto begin()
             {
-                return this->inner.view.begin();
+                return std::span(reinterpret_cast<byte_t *>(&this->inner), sizeof(Z)).begin();
             }
 
             auto end()
             {
-                return this->inner.view.end();
+                return std::span(reinterpret_cast<byte_t *>(&this->inner), sizeof(Z)).end();
             }
 
             int byteswap()
             {
-                std::reverse(this->begin(), this->end());
+                if constexpr (sizeof(Z) == 4)
+                {
+                    inner = *reinterpret_cast<Z *>(byteswap(*reinterpret_cast<uint32_t *>(&inner)));
+                }
+                else if constexpr (sizeof(Z) == 8)
+                {
+                    inner = *reinterpret_cast<Z *>(byteswap(*reinterpret_cast<uint64_t *>(&inner)));
+                }
+                else
+                {
+                    std::reverse(this->begin(), this->end());
+                }
                 return 0;
             }
         };
     }
 
-    /// @brief Implementation details of byte-shuffling and delta codec
+    /// @brief Implementation details of byte-shuffling codec
     namespace inner
     {
-
         using mzd::binary::byte_view;
         using mzd::binary::is_big_endian;
-
-        template <typename T>
-        void delta_encode(std::vector<T> &data)
-        {
-            size_t n = data.size();
-            if (n < 2)
-            {
-                return;
-            }
-            T prev = data[0];
-            T offset = data[0];
-
-            for (size_t i = 1; i < n; i++)
-            {
-                T tmp = data[i];
-                data[i] += offset - prev;
-                prev = tmp;
-            }
-        }
-
-        template <typename T>
-        void delta_decode(std::vector<T> &data)
-        {
-            size_t n = data.size();
-            if (n < 2)
-            {
-                return;
-            }
-
-            T offset = data[0];
-            T prev = data[1];
-            for (size_t i = 2; i < n; i++)
-            {
-                data[i] += prev - offset;
-                prev = data[i];
-            }
-        }
 
         /// @brief Shuffle the bytes of `data` into `buffer`. Also enforces little-endian ordering
         /// @tparam T
@@ -155,14 +143,15 @@ namespace mzd
                 for (size_t j = 0; j < data.size(); j++)
                 {
                     auto value = data[j];
-                    auto byteView = reinterpret_cast<uint8_t *>(&value);
-                    if (is_big_endian())
+                    byte_view<T> view = byte_view(value);
+                    auto buf = view.buffer();
+                    if constexpr (is_big_endian())
                     {
-                        buffer.push_back(byteView[(sizeof(T) - 1) - i]);
+                        buffer.push_back(buf[(sizeof(T) - 1) - i]);
                     }
                     else
                     {
-                        buffer.push_back(byteView[i]);
+                        buffer.push_back(buf[i]);
                     }
                 }
             }
@@ -186,14 +175,15 @@ namespace mzd
                 for (size_t j = 0; j < data.size(); j++)
                 {
                     auto value = data[j];
-                    auto byteView = reinterpret_cast<uint8_t *>(&value);
-                    if (is_big_endian())
+                    byte_view<T> view = byte_view(value);
+                    auto buf = view.buffer();
+                    if constexpr (is_big_endian())
                     {
-                        buffer.push_back(byteView[(sizeof(T) - 1) - i]);
+                        buffer.push_back(buf[(sizeof(T) - 1) - i]);
                     }
                     else
                     {
-                        buffer.push_back(byteView[i]);
+                        buffer.push_back(buf[i]);
                     }
                 }
             }
@@ -202,33 +192,7 @@ namespace mzd
 
         /// @brief Reverses the byte shuffling done by `tranpose` to read values from `buffer` back out into `data`
         /// @tparam T
-        /// @param buffer The transposesd data
-        /// @param data Where to store the un-transposed data
-        template <typename T>
-        void reverse_transpose(const buffer_t &buffer, std::vector<T> &data)
-        {
-            auto nBytes = buffer.size();
-            auto nData = nBytes / sizeof(T);
-            data.resize(nData);
-            for (size_t i = 0; i < buffer.size(); i++)
-            {
-                auto datum = &data[i % nData];
-                auto byteView = reinterpret_cast<uint8_t *>(datum);
-                if (is_big_endian())
-                {
-                    byteView[(sizeof(T) - 1) - (i / nData)] = buffer[i];
-                }
-                else
-                {
-                    byteView[i / nData] = buffer[i];
-                }
-            }
-            return;
-        }
-
-        /// @brief Reverses the byte shuffling done by `tranpose` to read values from `buffer` back out into `data`
-        /// @tparam T
-        /// @param buffer The transposesd data
+        /// @param buffer The transposed data
         /// @param data Where to store the un-transposed data
         template <typename T>
         void reverse_transpose(const buffer_span_t &buffer, std::vector<T> &data)
@@ -240,7 +204,7 @@ namespace mzd
             {
                 auto datum = &data[i % nData];
                 auto byteView = reinterpret_cast<uint8_t *>(datum);
-                if (is_big_endian())
+                if constexpr (is_big_endian())
                 {
                     byteView[(sizeof(T) - 1) - (i / nData)] = buffer[i];
                 }
@@ -251,7 +215,6 @@ namespace mzd
             }
             return;
         }
-
     }
 
     /// @brief Implementation of the dictionary codec
@@ -264,12 +227,12 @@ namespace mzd
         using mzd::inner::transpose;
 
         template <typename T, typename I, typename K>
-        int encode_dictionary_indices(const std::vector<T> &data, std::vector<I> sorted_values, buffer_t &transposeBuffer, buffer_t &outBuffer)
+        int encode_dictionary_indices(const std::span<const T> &data, std::vector<I> sorted_values, buffer_t &transposeBuffer, buffer_t &outBuffer)
         {
             std::unordered_map<I, size_t> value_to_indices;
             value_to_indices.reserve(sorted_values.size());
 
-            for (auto i = 0; i < sorted_values.size(); i++)
+            for (size_t i = 0; i < sorted_values.size(); i++)
             {
                 value_to_indices[sorted_values[i]] = i;
             }
@@ -283,7 +246,7 @@ namespace mzd
             view = byte_view<uint64_t>::as_little_endian(n_values);
             outBuffer.insert(outBuffer.end(), view.begin(), view.end());
 
-            transpose(sorted_values, transposeBuffer);
+            transpose<I>(sorted_values, transposeBuffer);
             outBuffer.insert(outBuffer.end(), transposeBuffer.begin(), transposeBuffer.end());
 
             std::vector<K> index_buffer;
@@ -297,14 +260,13 @@ namespace mzd
                 index_buffer.push_back(k_idx);
             }
 
-            transpose(index_buffer, transposeBuffer);
+            transpose<K>(index_buffer, transposeBuffer);
             outBuffer.insert(outBuffer.end(), transposeBuffer.begin(), transposeBuffer.end());
-
             return outBuffer.size();
         }
 
         template <typename T, typename I>
-        int encode_values(const std::vector<T> &data, buffer_t &transposeBuffer, buffer_t &outBuffer)
+        int encode_values(const std::span<const T> &data, buffer_t &transposeBuffer, buffer_t &outBuffer)
         {
             std::unordered_set<I> value_codes;
             for (T val : data)
@@ -318,31 +280,31 @@ namespace mzd
 
             auto n_values = value_codes_sorted.size();
 
-            if (n_values <= pow(2, 8))
+            if (n_values <= std::numeric_limits<uint8_t>::max())
             {
                 return encode_dictionary_indices<T, I, uint8_t>(data, value_codes_sorted, transposeBuffer, outBuffer);
             }
-            else if (n_values <= pow(2, 16))
+            else if (n_values <= std::numeric_limits<uint16_t>::max())
             {
                 return encode_dictionary_indices<T, I, uint16_t>(data, value_codes_sorted, transposeBuffer, outBuffer);
             }
-            else if (n_values <= pow(2, 32))
+            else if (n_values <= std::numeric_limits<uint32_t>::max())
             {
                 return encode_dictionary_indices<T, I, uint32_t>(data, value_codes_sorted, transposeBuffer, outBuffer);
             }
-            else if (n_values <= pow(2, 64))
+            else if (n_values <= std::numeric_limits<uint64_t>::max())
             {
                 return encode_dictionary_indices<T, I, uint64_t>(data, value_codes_sorted, transposeBuffer, outBuffer);
             }
             else
             {
-                throw new std::exception("Cannot encode a dictionary with more than 2 ** 64 distinct values");
+                throw std::runtime_error("Cannot encode a dictionary with more than 2 ** 64 distinct values");
             }
             return 0;
         }
 
         template <typename T>
-        int dictionary_encode(const std::vector<T> &data, buffer_t &transposeBuffer, buffer_t &outBuffer)
+        int dictionary_encode(const std::span<const T> &data, buffer_t &transposeBuffer, buffer_t &outBuffer)
         {
             if (sizeof(T) <= 1)
             {
@@ -362,7 +324,7 @@ namespace mzd
             }
             else
             {
-                throw new std::exception("Cannot encode a dictionary with more values longer than 8 bytes");
+                throw std::runtime_error("Cannot encode a dictionary with more values longer than 8 bytes");
             }
             return 0;
         }
@@ -370,24 +332,20 @@ namespace mzd
         template <typename T, typename I>
         int decode_values(const buffer_t &data, size_t offset, size_t n_values, std::vector<T> &values)
         {
-            auto start = data.begin() + 16;
-            auto end = data.begin() + offset;
-            auto step_size = sizeof(I);
-            byte_view<I> block;
-
-            std::span slice(start, end);
+            if (data.size() < offset)
+            {
+                std::stringstream ss;
+                ss << "Malformed dictionary, expected at least " << offset << " bytes but only found " << data.size();
+                throw std::runtime_error(ss.str());
+            }
+            buffer_span_t slice(data.data() + 16, offset - 16);
             std::vector<I> blocks;
             reverse_transpose(slice, blocks);
 
             auto i = 0;
             for (auto chunk : blocks)
             {
-                block.inner.value = chunk;
-                if constexpr (is_big_endian())
-                {
-                    block.byteswap();
-                }
-                T val = *reinterpret_cast<T *>(&block.buffer());
+                T val = *reinterpret_cast<T *>(&chunk);
                 values.push_back(val);
                 i += 1;
             }
@@ -397,21 +355,25 @@ namespace mzd
         template <typename T, typename K>
         int decode_indices(const buffer_t &data, size_t offset, std::vector<T> &values_lookup, std::vector<T> &values)
         {
-            auto start = data.begin() + offset;
-            auto end = data.end();
-            byte_view<K> block;
-
-            std::span slice(start, end);
+            if (data.size() < offset)
+            {
+                std::stringstream ss;
+                ss << "Malformed dictionary, expected at least " << offset << " bytes but only found " << data.size();
+                throw std::runtime_error(ss.str());
+            }
+            buffer_span_t slice(data.data() + offset, data.size() - offset);
             std::vector<K> blocks;
-            reverse_transpose(slice, blocks);
+            reverse_transpose<K>(slice, blocks);
+
+            size_t sz = values_lookup.size();
 
             for (auto idx : blocks)
             {
-                if constexpr (is_big_endian())
+                if (idx >= sz)
                 {
-                    block.inner.value = idx;
-                    block.byteswap();
-                    idx = block.value();
+                    std::stringstream ss;
+                    ss << "Malformed dictionary, decoded index " << idx << " but dictionary contains only " << sz << " values";
+                    throw std::runtime_error(ss.str());
                 }
                 T val = values_lookup[idx];
                 values.push_back(val);
@@ -429,26 +391,36 @@ namespace mzd
         {
             if (data.size() < 16)
             {
-                if (data.empty()) {
+                if (data.empty())
+                {
                     outBuffer.clear();
                     return 0;
                 }
-                throw new std::exception("Buffer less than 16 bytes long, invalid dictionary buffer");
+                throw std::runtime_error("Buffer less than 16 bytes long, invalid dictionary buffer");
             }
 
             byte_view<uint64_t> view;
-            std::copy(data.begin(), data.begin() + 8, view.begin());
+            std::memcpy((void *)&view, data.data(), 8);
+            if constexpr (is_big_endian())
+            {
+                view.byteswap();
+            }
             auto offset = view.value();
 
-            std::copy(data.begin() + 8, data.begin() + 16, view.begin());
+            std::memcpy((void *)&view, data.data() + 8, 8);
+            if constexpr (is_big_endian())
+            {
+                view.byteswap();
+            }
             auto n_values = view.value();
 
             if (data.size() < offset)
             {
-                throw new std::exception("Buffer less than value offsets, invalid dictionary buffer");
+                throw std::runtime_error("Buffer less than value offsets, invalid dictionary buffer");
             }
 
-            if (n_values == 0) {
+            if (n_values == 0)
+            {
                 outBuffer.clear();
                 return 0;
             }
@@ -459,109 +431,108 @@ namespace mzd
             if (value_size == 1)
             {
                 decode_values<T, uint8_t>(data, offset, n_values, value_lookup);
-                if (n_values < pow(2, 8))
+                if (n_values < std::numeric_limits<uint8_t>::max())
                 {
                     decode_indices<T, uint8_t>(data, offset, value_lookup, outBuffer);
                 }
-                else if (n_values < pow(2, 16))
+                else if (n_values < std::numeric_limits<uint16_t>::max())
                 {
                     decode_indices<T, uint16_t>(data, offset, value_lookup, outBuffer);
                 }
-                else if (n_values < pow(2, 32))
+                else if (n_values < std::numeric_limits<uint32_t>::max())
                 {
                     decode_indices<T, uint32_t>(data, offset, value_lookup, outBuffer);
                 }
-                else if (n_values < pow(2, 64))
+                else if (n_values < std::numeric_limits<uint64_t>::max())
                 {
                     decode_indices<T, uint64_t>(data, offset, value_lookup, outBuffer);
                 }
                 else
                 {
-                    throw new std::exception("Too many value indices!");
+                    throw std::runtime_error("Too many value indices!");
                 }
             }
             else if (value_size == 2)
             {
                 decode_values<T, uint16_t>(data, offset, n_values, value_lookup);
-                if (n_values < pow(2, 8))
+                if (n_values < std::numeric_limits<uint8_t>::max())
                 {
                     decode_indices<T, uint8_t>(data, offset, value_lookup, outBuffer);
                 }
-                else if (n_values < pow(2, 16))
+                else if (n_values < std::numeric_limits<uint16_t>::max())
                 {
                     decode_indices<T, uint16_t>(data, offset, value_lookup, outBuffer);
                 }
-                else if (n_values < pow(2, 32))
+                else if (n_values < std::numeric_limits<uint32_t>::max())
                 {
                     decode_indices<T, uint32_t>(data, offset, value_lookup, outBuffer);
                 }
-                else if (n_values < pow(2, 64))
+                else if (n_values < std::numeric_limits<uint64_t>::max())
                 {
                     decode_indices<T, uint64_t>(data, offset, value_lookup, outBuffer);
                 }
                 else
                 {
-                    throw new std::exception("Too many value indices!");
+                    throw std::runtime_error("Too many value indices!");
                 }
             }
             else if (value_size == 4)
             {
                 decode_values<T, uint32_t>(data, offset, n_values, value_lookup);
-                if (n_values < pow(2, 8))
+                if (n_values < std::numeric_limits<uint8_t>::max())
                 {
                     decode_indices<T, uint8_t>(data, offset, value_lookup, outBuffer);
                 }
-                else if (n_values < pow(2, 16))
+                else if (n_values < std::numeric_limits<uint16_t>::max())
                 {
                     decode_indices<T, uint16_t>(data, offset, value_lookup, outBuffer);
                 }
-                else if (n_values < pow(2, 32))
+                else if (n_values < std::numeric_limits<uint32_t>::max())
                 {
                     decode_indices<T, uint32_t>(data, offset, value_lookup, outBuffer);
                 }
-                else if (n_values < pow(2, 64))
+                else if (n_values < std::numeric_limits<uint64_t>::max())
                 {
                     decode_indices<T, uint64_t>(data, offset, value_lookup, outBuffer);
                 }
                 else
                 {
-                    throw new std::exception("Too many value indices!");
+                    throw std::runtime_error("Too many value indices!");
                 }
             }
             else if (value_size == 8)
             {
                 decode_values<T, uint64_t>(data, offset, n_values, value_lookup);
-                if (n_values < pow(2, 8))
+                if (n_values < std::numeric_limits<uint8_t>::max())
                 {
                     decode_indices<T, uint8_t>(data, offset, value_lookup, outBuffer);
                 }
-                else if (n_values < pow(2, 16))
+                else if (n_values < std::numeric_limits<uint16_t>::max())
                 {
                     decode_indices<T, uint16_t>(data, offset, value_lookup, outBuffer);
                 }
-                else if (n_values < pow(2, 32))
+                else if (n_values < std::numeric_limits<uint32_t>::max())
                 {
                     decode_indices<T, uint32_t>(data, offset, value_lookup, outBuffer);
                 }
-                else if (n_values < pow(2, 64))
+                else if (n_values < std::numeric_limits<uint64_t>::max())
                 {
                     decode_indices<T, uint64_t>(data, offset, value_lookup, outBuffer);
                 }
                 else
                 {
-                    throw new std::exception("Too many value indices!");
+                    throw std::runtime_error("Too many value indices!");
                 }
             }
             else
             {
-                throw new std::exception("Value size too large, value cannot be longer than 8 bytes");
+                throw std::runtime_error("Value size too large, value cannot be longer than 8 bytes");
             }
 
             return 0;
         }
     }
-
-    /// @brief Compress an array of numerical data using byte shuffling and ZSTD compression
+    /// @brief Compress an array of numerical data using byte shuffling and ZSTD compression. Data will be stored in little endian byte order.
     /// @tparam T The data type of the array to compress
     /// @param data The data array to compress
     /// @param transposeBuffer An intermediate byte buffer to shuffle bytes into
@@ -574,9 +545,33 @@ namespace mzd
                                        buffer_t &outBuffer,
                                        int level = ZSTD_defaultCLevel())
     {
+        const std::span<const T> view(data.data(), data.size());
+        return byteshuffle_compress_buffer(view, transposeBuffer, outBuffer, level);
+    }
+
+    /// @brief Compress an array of numerical data using byte shuffling and ZSTD compression. Data will be stored in little endian byte order.
+    /// @tparam T The data type of the array to compress
+    /// @param data The data array to compress
+    /// @param transposeBuffer An intermediate byte buffer to shuffle bytes into
+    /// @param outBuffer A byte buffer to write ZSTD-compressed bytes to
+    /// @param level The ZSTD compression level
+    /// @return 0 if successful, some other value corresponding to a ZSTD error code otherwise
+    template <typename T>
+    size_t byteshuffle_compress_buffer(const std::span<const T> &data,
+                                       buffer_t &transposeBuffer,
+                                       buffer_t &outBuffer,
+                                       int level = ZSTD_defaultCLevel())
+    {
         transposeBuffer.clear();
-        inner::transpose(data, transposeBuffer);
+        inner::transpose<T>(data, transposeBuffer);
         auto outputBound = ZSTD_compressBound(transposeBuffer.size());
+        if (ZSTD_isError(outputBound))
+        {
+            auto errCode = ZSTD_getErrorCode(outputBound);
+            std::stringstream ss;
+            ss << "Zstd error: " << errCode << " " << std::string(ZSTD_getErrorName(errCode)) << " " << std::string(ZSTD_getErrorString(errCode));
+            throw std::runtime_error(ss.str());
+        }
         outBuffer.resize(outputBound);
         auto used = ZSTD_compress(
             (void *)outBuffer.data(),
@@ -586,7 +581,10 @@ namespace mzd
             level);
         if (ZSTD_isError(used))
         {
-            return used;
+            auto errCode = ZSTD_getErrorCode(used);
+            std::stringstream ss;
+            ss << "Zstd error: " << errCode << " " << std::string(ZSTD_getErrorName(errCode)) << " " << std::string(ZSTD_getErrorString(errCode));
+            throw std::runtime_error(ss.str());
         }
         outBuffer.resize(used);
         return 0;
@@ -618,7 +616,8 @@ namespace mzd
                                          buffer_t &transposeBuffer,
                                          std::vector<T> &dataBuffer)
     {
-        if (buffer.empty()) {
+        if (buffer.empty())
+        {
             dataBuffer.clear();
             return 0;
         }
@@ -626,7 +625,10 @@ namespace mzd
         auto outputBound = ZSTD_getFrameContentSize(buffer.data(), buffer.size());
         if (ZSTD_isError(outputBound))
         {
-            return outputBound;
+            auto errCode = ZSTD_getErrorCode(outputBound);
+            std::stringstream ss;
+            ss << "Zstd error: " << errCode << " " << std::string(ZSTD_getErrorName(errCode)) << " " << std::string(ZSTD_getErrorString(errCode));
+            throw std::runtime_error(ss.str());
         }
         transposeBuffer.resize(outputBound);
         auto used = ZSTD_decompress(
@@ -636,49 +638,17 @@ namespace mzd
             buffer.size());
         if (ZSTD_isError(used))
         {
-            return used;
+            auto errCode = ZSTD_getErrorCode(used);
+            std::stringstream ss;
+            ss << "Zstd error: " << errCode << " " << std::string(ZSTD_getErrorName(errCode)) << " " << std::string(ZSTD_getErrorString(errCode));
+            throw std::runtime_error(ss.str());
         }
         transposeBuffer.resize(used);
         inner::reverse_transpose(transposeBuffer, dataBuffer);
         return 0;
     }
 
-    /// @brief Compress an array of numerical data using delta encoding, byte shuffling and ZSTD compression
-    /// @tparam T The data type of the array to compress
-    /// @param data The data array to compress. *This array will be mutated with delta encoding*
-    /// @param transposeBuffer An intermediate byte buffer to shuffle bytes into
-    /// @param outBuffer A byte buffer to write ZSTD-compressed bytes to
-    /// @param level The ZSTD compression level
-    /// @return 0 if successful, some other value corresponding to a ZSTD error code otherwise
-    template <typename T>
-    size_t delta_compress_buffer(
-        std::vector<T> &data,
-        buffer_t &transposeBuffer,
-        buffer_t &outBuffer,
-        int level = ZSTD_defaultCLevel())
-    {
-        inner::delta_encode(data);
-        return byteshuffle_compress_buffer(data, transposeBuffer, outBuffer);
-    }
-
-    /// @brief Decompress an array of numerical data using delta encoding, byte shuffling and ZSTD compression
-    /// @tparam T The data type of the array to compress
-    /// @param buffer A byte buffer to containing ZSTD-compressed bytes
-    /// @param transposeBuffer An intermediate byte buffer to shuffle bytes into
-    /// @param dataBuffer The data array to decompress into
-    /// @return 0 if successful, some other value corresponding to a ZSTD error code otherwise
-    template <typename T>
-    size_t delta_decompress_buffer(
-        const buffer_span_t &buffer,
-        buffer_t &transposeBuffer,
-        std::vector<T> &dataBuffer)
-    {
-        auto z = byteshuffle_decompress_buffer(buffer, transposeBuffer, dataBuffer);
-        inner::delta_decode(dataBuffer);
-        return z;
-    }
-
-    /// @brief Compress an array of numerical data using dictionary encoding and ZSTD compression
+    /// @brief Compress an array of numerical data using dictionary encoding and ZSTD compression. Data will be stored in little-endian byte order
     /// @tparam T The data type of the array to compress
     /// @param data The data array to compress
     /// @param dictBuffer An intermediate byte buffer to hold the dictionary encoded bytes in
@@ -688,17 +658,24 @@ namespace mzd
     /// @return 0 if successful, some other value corresponding to a ZSTD error code otherwise
     template <typename T>
     size_t dict_compress_buffer(
-        const std::vector<T> &data,
+        const std::span<const T> &data,
         buffer_t &dictBuffer,
         buffer_t &transposeBuffer,
         buffer_t &outBuffer,
         int level = ZSTD_defaultCLevel())
     {
         dictBuffer.clear();
-        dict::dictionary_encode(data, transposeBuffer, dictBuffer);
+        dict::dictionary_encode<T>(data, transposeBuffer, dictBuffer);
         dictBuffer.shrink_to_fit();
 
         auto outputBound = ZSTD_compressBound(dictBuffer.size());
+        if (ZSTD_isError(outputBound))
+        {
+            auto errCode = ZSTD_getErrorCode(outputBound);
+            std::stringstream ss;
+            ss << "Zstd error: " << errCode << " " << std::string(ZSTD_getErrorName(errCode)) << " " << std::string(ZSTD_getErrorString(errCode));
+            throw std::runtime_error(ss.str());
+        }
         outBuffer.resize(outputBound);
         auto used = ZSTD_compress(
             (void *)outBuffer.data(),
@@ -708,7 +685,10 @@ namespace mzd
             level);
         if (ZSTD_isError(used))
         {
-            return used;
+            auto errCode = ZSTD_getErrorCode(used);
+            std::stringstream ss;
+            ss << "Zstd error: " << errCode << " " << std::string(ZSTD_getErrorName(errCode)) << " " << std::string(ZSTD_getErrorString(errCode));
+            throw std::runtime_error(ss.str());
         }
         outBuffer.resize(used);
         return 0;
@@ -722,12 +702,12 @@ namespace mzd
         int level = ZSTD_defaultCLevel())
     {
         buffer_t transposeBuffer;
-        return dict_compress_buffer(data, dictBuffer, transposeBuffer, outBuffer, level);
+        return dict_compress_buffer<T>(data, dictBuffer, transposeBuffer, outBuffer, level);
     }
 
     /// @brief Decompress an array of numerical data using dictionary encoding and ZSTD compression
     /// @tparam T The data type of the array to compress
-    /// @param buffer A byte buffer to containing ZSTD-compressed bytes
+    /// @param buffer A byte buffer containing ZSTD-compressed bytes
     /// @param dictBuffer An intermediate byte buffer to hold the dictionary encoded bytes
     /// @param dataBuffer The data array to decompress into
     /// @return 0 if successful, some other value corresponding to a ZSTD error code otherwise
@@ -737,7 +717,8 @@ namespace mzd
         buffer_t &dictBuffer,
         std::vector<T> &dataBuffer)
     {
-        if(buffer.empty()) {
+        if (buffer.empty())
+        {
             dataBuffer.clear();
             return 0;
         }
@@ -745,7 +726,10 @@ namespace mzd
         auto outputBound = ZSTD_getFrameContentSize(buffer.data(), buffer.size());
         if (ZSTD_isError(outputBound))
         {
-            return outputBound;
+            auto errCode = ZSTD_getErrorCode(outputBound);
+            std::stringstream ss;
+            ss << "Zstd error: " << errCode << " " << std::string(ZSTD_getErrorName(errCode)) << " " << std::string(ZSTD_getErrorString(errCode));
+            throw std::runtime_error(ss.str());
         }
         dictBuffer.resize(outputBound);
         auto used = ZSTD_decompress(
@@ -753,28 +737,47 @@ namespace mzd
             outputBound,
             (void *)buffer.data(),
             buffer.size());
+        if (ZSTD_isError(used))
+        {
+            auto errCode = ZSTD_getErrorCode(used);
+            std::stringstream ss;
+            ss << "Zstd error: " << errCode << " " << std::string(ZSTD_getErrorName(errCode)) << " " << std::string(ZSTD_getErrorString(errCode));
+            throw std::runtime_error(ss.str());
+        }
         dataBuffer.clear();
         return dict::dictionary_decode(
             dictBuffer,
             dataBuffer);
     }
 
+    /// @brief Compress an array of numerical data using ZSTD compression. Data will be stored in little-endian byte order
+    /// @tparam T The data type of the array to compress
+    /// @param data The data array to compress
+    /// @param outBuffer The byte buffer to compress into
+    /// @return 0 if successful, some other value corresponding to a ZSTD error code otherwise
     template <typename T>
-    size_t compress_buffer(const std::vector<T> &data,
+    size_t compress_buffer(const std::span<const T> &data,
                            buffer_t &outBuffer,
                            int level = ZSTD_defaultCLevel())
     {
-        auto outputBound = ZSTD_compressBound(data.size());
+        auto outputBound = ZSTD_compressBound(data.size() * sizeof(T));
+        if (ZSTD_isError(outputBound))
+        {
+            auto errCode = ZSTD_getErrorCode(outputBound);
+            std::stringstream ss;
+            ss << "Zstd error: " << errCode << " " << std::string(ZSTD_getErrorName(errCode)) << " " << std::string(ZSTD_getErrorString(errCode));
+            throw std::runtime_error(ss.str());
+        }
         outBuffer.resize(outputBound);
-        if (mzd::binary::is_big_endian())
+        if constexpr (binary::is_big_endian() && sizeof(T) > 1)
         {
             buffer_t revEndian;
             revEndian.reserve(data.size() * sizeof(T));
             for (size_t i = 0; i < data.size(); i++)
             {
-                auto val = data[i];
+                const T val = data[i];
                 binary::byte_view<T> view = binary::byte_view<T>::as_little_endian(val);
-                std::copy(view.begin(), view.end(), revEndian.end());
+                std::copy(view.begin(), view.end(), std::back_inserter(revEndian));
             }
             auto used = ZSTD_compress(
                 (void *)outBuffer.data(),
@@ -784,7 +787,10 @@ namespace mzd
                 level);
             if (ZSTD_isError(used))
             {
-                return used;
+                auto errCode = ZSTD_getErrorCode(used);
+                std::stringstream ss;
+                ss << "Zstd error: " << errCode << " " << std::string(ZSTD_getErrorName(errCode)) << " " << std::string(ZSTD_getErrorString(errCode));
+                throw std::runtime_error(ss.str());
             }
             outBuffer.resize(used);
         }
@@ -794,30 +800,42 @@ namespace mzd
                 (void *)outBuffer.data(),
                 outputBound,
                 (void *)data.data(),
-                data.size(),
+                data.size() * sizeof(T),
                 level);
             if (ZSTD_isError(used))
             {
-                return used;
+                auto errCode = ZSTD_getErrorCode(used);
+                std::stringstream ss;
+                ss << "Zstd error: " << errCode << " " << std::string(ZSTD_getErrorName(errCode)) << " " << std::string(ZSTD_getErrorString(errCode));
+                throw std::runtime_error(ss.str());
             }
             outBuffer.resize(used);
         }
         return 0;
     }
 
+    /// @brief Decompress Zstd-compressed data back into it's native format.
+    /// @tparam T The data type of the array to decompress to
+    /// @param buffer A byte buffer containing containing little endian ZSTD-compressed bytes
+    /// @param dataBuffer The data array to decompress into. Data will be in native byte ordering
+    /// @return 0 if successful, some other value corresponding to a ZSTD error code otherwise
     template <typename T>
     size_t decompress_buffer(const buffer_span_t &buffer, std::vector<T> &dataBuffer)
     {
-        if (buffer.empty()) {
+        if (buffer.empty())
+        {
             dataBuffer.clear();
             return 0;
         }
         auto outputBound = ZSTD_getFrameContentSize(buffer.data(), buffer.size());
         if (ZSTD_isError(outputBound))
         {
-            return outputBound;
+            auto errCode = ZSTD_getErrorCode(outputBound);
+            std::stringstream ss;
+            ss << "Zstd error: " << errCode << " " << std::string(ZSTD_getErrorName(errCode)) << " " << std::string(ZSTD_getErrorString(errCode));
+            throw std::runtime_error(ss.str());
         }
-        dataBuffer.resize(outputBound);
+        dataBuffer.resize(outputBound / sizeof(T));
         auto used = ZSTD_decompress(
             (void *)dataBuffer.data(),
             outputBound,
@@ -825,9 +843,13 @@ namespace mzd
             buffer.size());
         if (ZSTD_isError(used))
         {
-            return used;
+            auto errCode = ZSTD_getErrorCode(used);
+            std::stringstream ss;
+            ss << "Zstd error: " << errCode << " " << std::string(ZSTD_getErrorName(errCode)) << " " << std::string(ZSTD_getErrorString(errCode));
+            throw std::runtime_error(ss.str());
         }
-        if (binary::is_big_endian())
+        dataBuffer.resize(used / sizeof(T));
+        if constexpr (binary::is_big_endian() && sizeof(T) > 1)
         {
             for (size_t i = 0; i < dataBuffer.size(); i++)
             {
@@ -839,4 +861,20 @@ namespace mzd
         }
         return 0;
     }
+
+    /// @brief Compress an array of numerical data using ZSTD compression. Data will be stored in little-endian byte order.
+    /// @tparam T The data type of the array to compress
+    /// @param data The data array to compress
+    /// @param outBuffer The byte buffer to compress into
+    /// @return 0 if successful, some other value corresponding to a ZSTD error code otherwise
+    template <typename T>
+    size_t compress_buffer(const std::vector<T> &data,
+                           buffer_t &outBuffer,
+                           int level = ZSTD_defaultCLevel())
+    {
+        const std::span<const T> view(data.data(), data.size());
+        return compress_buffer(view, outBuffer, level);
+    }
 }
+
+#endif
